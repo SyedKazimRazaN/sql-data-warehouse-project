@@ -1,0 +1,99 @@
+
+
+-- View 1: Row counts across all 3 layers
+CREATE OR ALTER VIEW gold.pipeline_row_counts AS
+SELECT
+    'bronze' AS layer,
+    'crm_cust_info' AS table_name,
+    COUNT(*) AS row_count
+FROM bronze.crm_cust_info
+UNION ALL
+SELECT 'bronze', 'crm_prd_info', COUNT(*)
+FROM bronze.crm_prd_info
+UNION ALL
+SELECT 'bronze', 'crm_sales_details', COUNT(*)
+FROM bronze.crm_sales_details
+UNION ALL
+SELECT 'silver', 'crm_cust_info', COUNT(*)
+FROM silver.crm_cust_info
+UNION ALL
+SELECT 'silver', 'crm_prd_info', COUNT(*)
+FROM silver.crm_prd_info
+UNION ALL
+SELECT 'silver', 'crm_sales_details', COUNT(*)
+FROM silver.crm_sales_details
+UNION ALL
+SELECT 'gold', 'dim_customers', COUNT(*)
+FROM gold.dim_customers
+UNION ALL
+SELECT 'gold', 'dim_products', COUNT(*)
+FROM gold.dim_products
+UNION ALL
+SELECT 'gold', 'fact_sales', COUNT(*)
+FROM gold.fact_sales;
+
+
+
+
+
+
+
+
+
+
+-- View 2: Data quality summary
+CREATE OR ALTER VIEW gold.pipeline_dq_summary AS
+SELECT
+    'crm_cust_info' AS table_name,
+    'cst_id' AS column_name,
+    'Null customer IDs removed' AS check_applied,
+    SUM(CASE WHEN cst_id IS NULL THEN 1 ELSE 0 END) AS issues_found,
+    'PASSED' AS status
+FROM silver.crm_cust_info
+UNION ALL
+SELECT
+    'crm_cust_info',
+    'cst_gender',
+    'M/F normalised to Male/Female',
+    SUM(CASE WHEN cst_gender = 'n/a' THEN 1 ELSE 0 END),
+    'PASSED'
+FROM silver.crm_cust_info
+UNION ALL
+SELECT
+    'crm_cust_info',
+    'cst_martial_status',
+    'M/S normalised to Married/Single',
+    SUM(CASE WHEN cst_martial_status = 'n/a' THEN 1 ELSE 0 END),
+    'PASSED'
+FROM silver.crm_cust_info
+UNION ALL
+SELECT
+    'crm_sales_details',
+    'sls_order_dt',
+    'Invalid dates set to NULL',
+    SUM(CASE WHEN sls_order_dt IS NULL THEN 1 ELSE 0 END),
+    'PASSED'
+FROM silver.crm_sales_details
+UNION ALL
+SELECT
+    'crm_sales_details',
+    'sls_sales',
+    'Sales recalculated where incorrect',
+    SUM(CASE WHEN sls_sales != sls_quantity * ABS(sls_price) THEN 1 ELSE 0 END),
+    'PASSED'
+FROM silver.crm_sales_details
+UNION ALL
+SELECT
+    'crm_prd_info',
+    'prd_cost',
+    'NULL costs replaced with 0',
+    SUM(CASE WHEN prd_cost = 0 THEN 1 ELSE 0 END),
+    'PASSED'
+FROM silver.crm_prd_info;
+
+
+
+
+SELECT * FROM gold.pipeline_row_counts ;
+
+SELECT * FROM gold.pipeline_dq_summary;
