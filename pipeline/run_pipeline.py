@@ -1,9 +1,13 @@
 # pipeline/run_pipeline.py
 
 """
-Portfolio-ready Data Warehouse pipeline.
-Triggers Bronze → Silver → Gold layers automatically.
-Includes logging, duration tracking, and simple data quality checks.
+Production-style Data Warehouse pipeline.
+Includes:
+✔ Bronze → Silver → Gold execution
+✔ Step-level logging
+✔ Pipeline run logging
+✔ Error tracking
+✔ Data quality checks
 """
 
 import pyodbc
@@ -11,47 +15,48 @@ from datetime import datetime
 
 # ------------------ Logging ------------------
 def log(message, level="INFO"):
-    """Structured logger with timestamp and log level"""
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [{level}] {message}")
+
+# ------------------ Step Logger ------------------
+def log_step(cursor, run_id, step_name, status, start, end, error=None):
+    duration = (end - start).total_seconds()
+
+    cursor.execute("""
+        INSERT INTO monitoring.step_log
+        (run_id, step_name, status, start_time, end_time, duration_seconds, error_message)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, run_id, step_name, status, start, end, duration, error)
+
+    cursor.connection.commit()
 
 # ------------------ Execute Stored Procedure ------------------
 def execute_stored_procedure(cursor, sp_name):
-    """Executes a given stored procedure and logs duration"""
-    log(f"Starting {sp_name}...", "INFO")
-    start_time = datetime.now()
     cursor.execute(f"EXEC {sp_name}")
     cursor.connection.commit()
-    end_time = datetime.now()
-    duration = (end_time - start_time).total_seconds()
-    log(f"Completed {sp_name} in {duration:.2f} seconds.", "INFO")
-    return duration
 
 # ------------------ Data Quality Check ------------------
 def check_silver_quality(cursor):
-    """Run simple data quality checks on Silver layer"""
     log("Running Silver layer data quality checks...", "INFO")
-    
-    # Example: Check for NULLs in primary key
+
     cursor.execute("SELECT COUNT(*) FROM silver.crm_cust_info WHERE cst_id IS NULL")
     null_count = cursor.fetchone()[0]
-    log(f"NULL cst_id count in Silver: {null_count}", "INFO")
-    
-    # Example: Check for duplicates in primary key
+
     cursor.execute("""
-        SELECT COUNT(*) - COUNT(DISTINCT cst_id) 
+        SELECT COUNT(*) - COUNT(DISTINCT cst_id)
         FROM silver.crm_cust_info
     """)
     dup_count = cursor.fetchone()[0]
-    log(f"Duplicate cst_id count in Silver: {dup_count}", "INFO")
-    
-    log("Silver layer quality checks completed.", "INFO")
+
+    log(f"NULL cst_id: {null_count}, Duplicates: {dup_count}", "INFO")
 
 # ------------------ Main Pipeline ------------------
 def main():
     pipeline_start = datetime.now()
     log("Starting full Data Warehouse pipeline...", "INFO")
 
-    # SQL Server connection
+    status = "Success"
+    rows_loaded = 0
+
     try:
         conn = pyodbc.connect(
             "DRIVER={ODBC Driver 17 for SQL Server};"
@@ -60,29 +65,90 @@ def main():
             "Trusted_Connection=yes;"
         )
         cursor = conn.cursor()
-        
-        # ---------------- Run Bronze ----------------
-        execute_stored_procedure(cursor, "bronze.load_bronze")
 
-        # ---------------- Run Silver ----------------
-        execute_stored_procedure(cursor, "silver.load_silver")
+        # ---------------- Create Run ID ----------------
+        cursor.execute("""
+            INSERT INTO monitoring.pipeline_run_log (status, rows_loaded, duration_seconds)
+            OUTPUT INSERTED.run_id
+            VALUES ('Running', 0, 0)
+        """)
+        run_id = cursor.fetchone()[0]
+        conn.commit()
 
-        # ---------------- Data Quality Checks ----------------
-        check_silver_quality(cursor)
+        # ---------------- BRONZE ----------------
+        start = datetime.now()
+        try:
+            log("Starting BRONZE...", "INFO")
+            execute_stored_procedure(cursor, "bronze.load_bronze")
+            end = datetime.now()
+            log_step(cursor, run_id, "BRONZE", "SUCCESS", start, end)
+        except Exception as e:
+            end = datetime.now()
+            log_step(cursor, run_id, "BRONZE", "FAILED", start, end, str(e))
+            raise
 
-        # ---------------- Gold Layer (Views) ----------------
-        log("Gold layer is built using SQL views.", "INFO")
-        # Optional: execute a stored procedure if you have one
-        # execute_stored_procedure(cursor, "gold.build_views")
+        # ---------------- SILVER ----------------
+        start = datetime.now()
+        try:
+            log("Starting SILVER...", "INFO")
+            execute_stored_procedure(cursor, "silver.load_silver")
+            end = datetime.now()
+            log_step(cursor, run_id, "SILVER", "SUCCESS", start, end)
+        except Exception as e:
+            end = datetime.now()
+            log_step(cursor, run_id, "SILVER", "FAILED", start, end, str(e))
+            raise
+
+        # ---------------- DATA QUALITY ----------------
+        start = datetime.now()
+        try:
+            check_silver_quality(cursor)
+            end = datetime.now()
+            log_step(cursor, run_id, "DATA_QUALITY", "SUCCESS", start, end)
+        except Exception as e:
+            end = datetime.now()
+            log_step(cursor, run_id, "DATA_QUALITY", "FAILED", start, end, str(e))
+            raise
+
+        # ---------------- GOLD ----------------
+        start = datetime.now()
+        try:
+            log("Building GOLD views...", "INFO")
+            end = datetime.now()
+            log_step(cursor, run_id, "GOLD", "SUCCESS", start, end)
+        except Exception as e:
+            end = datetime.now()
+            log_step(cursor, run_id, "GOLD", "FAILED", start, end, str(e))
+
+        # ---------------- ROW COUNT ----------------
+        cursor.execute("SELECT COUNT(*) FROM gold.fact_sales")
+        rows_loaded = cursor.fetchone()[0]
 
         pipeline_end = datetime.now()
-        total_duration = (pipeline_end - pipeline_start).total_seconds()
-        log(f"FULL PIPELINE COMPLETED in {total_duration:.2f} seconds", "INFO")
+        total_duration = int((pipeline_end - pipeline_start).total_seconds())
+
+        log(f"PIPELINE COMPLETED in {total_duration}s", "INFO")
 
     except Exception as e:
-        log(f"ERROR: {e}", "ERROR")
+        status = "Failed"
+        log(f"PIPELINE FAILED: {e}", "ERROR")
+        total_duration = int((datetime.now() - pipeline_start).total_seconds())
 
     finally:
+        # ---------------- UPDATE RUN LOG ----------------
+        try:
+            cursor.execute("""
+                UPDATE monitoring.pipeline_run_log
+                SET status = ?, rows_loaded = ?, duration_seconds = ?
+                WHERE run_id = ?
+            """, (status, rows_loaded, total_duration, run_id))
+
+            conn.commit()
+            log("Pipeline run logged successfully.", "INFO")
+
+        except Exception as log_error:
+            log(f"Logging failed: {log_error}", "ERROR")
+
         cursor.close()
         conn.close()
 
