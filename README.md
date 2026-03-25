@@ -71,7 +71,7 @@ This project includes a **pipeline observability layer** that tracks ETL executi
 5. **Consumption Layer**
    - Power BI dashboards for business insights
 
-![Data Flow](https://github.com/SyedKazimRazaN/sql-data-warehouse-project/raw/main/docs/data_flow.png)
+![Data Flow](https://github.com/SyedKazimRazaN/sql-data-warehouse-project/raw/main/docs/data_flows.png)
    
 
 ---
